@@ -11,7 +11,12 @@ from aws_cdk import (
     aws_iam as iam,
     aws_logs as logs,
     aws_wafv2 as wafv2,
+    aws_s3 as s3,
+    aws_synthetics as synthetics,
+    aws_cloudwatch as cloudwatch,
     Duration,
+    RemovalPolicy,
+    CfnOutput,
 )
 from constructs import Construct
 
@@ -215,4 +220,116 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
             "WebAclAssociation",
             resource_arn=f"arn:aws:apigateway:{self.region}::/restapis/{api.rest_api_id}/stages/{api.deployment_stage.stage_name}",
             web_acl_arn=web_acl.attr_arn
+        )
+
+        # Create S3 bucket for canary artifacts
+        canary_bucket = s3.Bucket(
+            self,
+            "CanaryArtifacts",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+
+        # Create IAM role for canary
+        canary_role = iam.Role(
+            self,
+            "CanaryRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "CloudWatchSyntheticsFullAccess"
+                )
+            ],
+        )
+
+        # Grant canary access to S3 bucket
+        canary_bucket.grant_read_write(canary_role)
+
+        # Create CloudWatch Synthetic Canary
+        canary = synthetics.CfnCanary(
+            self,
+            "ApiCanary",
+            name="api-endpoint-canary",
+            artifact_s3_location=f"s3://{canary_bucket.bucket_name}/canary",
+            execution_role_arn=canary_role.role_arn,
+            runtime_version="syn-python-selenium-1.3",
+            schedule=synthetics.CfnCanary.ScheduleProperty(
+                expression="rate(5 minutes)", duration_in_seconds=0
+            ),
+            code=synthetics.CfnCanary.CodeProperty(
+                handler="api_canary.handler",
+                s3_bucket=canary_bucket.bucket_name,
+                s3_key="canary-code.zip",
+            ),
+            start_canary_after_creation=False,
+            run_config=synthetics.CfnCanary.RunConfigProperty(
+                timeout_in_seconds=60,
+                environment_variables={
+                    "API_URL": api.url,
+                    "API_KEY": api_key.key_id,
+                },
+            ),
+        )
+
+        # Create CloudWatch alarms for Lambda errors
+        error_alarm = cloudwatch.Alarm(
+            self,
+            "LambdaErrorAlarm",
+            metric=api_hanlder.metric_errors(
+                statistic="Sum",
+                period=Duration.minutes(5),
+            ),
+            threshold=5,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            alarm_description="Alert when Lambda function has more than 5 errors in 10 minutes",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+
+        # Create CloudWatch alarm for Lambda duration
+        latency_alarm = cloudwatch.Alarm(
+            self,
+            "LambdaLatencyAlarm",
+            metric=api_hanlder.metric_duration(
+                statistic="Average",
+                period=Duration.minutes(5),
+            ),
+            threshold=3000,
+            evaluation_periods=2,
+            alarm_description="Alert when Lambda average duration exceeds 3 seconds",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+
+        # Create CloudWatch alarm for canary failures
+        canary_alarm = cloudwatch.Alarm(
+            self,
+            "CanaryFailureAlarm",
+            metric=cloudwatch.Metric(
+                namespace="CloudWatchSynthetics",
+                metric_name="Failed",
+                dimensions_map={"CanaryName": "api-endpoint-canary"},
+                statistic="Sum",
+                period=Duration.minutes(5),
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Alert when canary test fails",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+
+        # Outputs
+        CfnOutput(
+            self,
+            "ApiUrl",
+            value=api.url,
+            description="API Gateway endpoint URL",
+        )
+
+        CfnOutput(
+            self,
+            "CanaryName",
+            value="api-endpoint-canary",
+            description="CloudWatch Synthetic Canary name",
         )
