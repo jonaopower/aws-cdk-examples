@@ -100,6 +100,62 @@ The API is protected with the following limits per API key:
 - Burst limit: 20 concurrent requests
 - Daily quota: 10,000 requests
 
+## Monitoring and Observability
+
+### AWS X-Ray Tracing
+This application has end-to-end tracing enabled using AWS X-Ray:
+- API Gateway traces all incoming requests
+- Lambda function traces execution with active tracing
+- DynamoDB operations are automatically traced
+
+To view traces:
+1. Navigate to AWS X-Ray console
+2. Select "Service Map" to see component interactions
+3. Select "Traces" to view individual request traces
+4. Use filters to find specific requests or errors
+
+### CloudWatch ServiceLens
+ServiceLens provides a unified view of your application:
+1. Navigate to CloudWatch console
+2. Select "ServiceLens" from the left menu
+3. View the service map showing all components
+4. Click on any service to see metrics, logs, and traces
+5. Investigate issues by correlating traces with logs and alarms
+
+### CloudWatch Synthetic Canary
+A synthetic canary tests the API endpoint every 5 minutes:
+- Canary name: `api-endpoint-canary`
+- Tests API availability and response time
+- Integrated with X-Ray for end-to-end tracing
+
+To view canary results:
+1. Navigate to CloudWatch console
+2. Select "Synthetics" under "Application monitoring"
+3. Click on `api-endpoint-canary` to view test results
+
+**Note:** After deployment, you must manually upload the canary code and start the canary:
+```bash
+# Package canary code
+cd lambda/canary
+zip -r canary-code.zip api_canary.py requirements.txt
+
+# Upload to S3 (replace BUCKET_NAME with the canary artifacts bucket)
+aws s3 cp canary-code.zip s3://BUCKET_NAME/canary-code.zip
+
+# Start the canary
+aws synthetics start-canary --name api-endpoint-canary
+```
+
+### CloudWatch Alarms
+Three alarms monitor the application health:
+1. **LambdaErrorAlarm**: Triggers when Lambda has >5 errors in 10 minutes
+2. **LambdaLatencyAlarm**: Triggers when average duration exceeds 3 seconds
+3. **CanaryFailureAlarm**: Triggers when synthetic canary test fails
+
+To configure alarm notifications:
+1. Create an SNS topic for notifications
+2. Add the SNS topic as an alarm action in the CloudWatch console
+
 ## Cleanup 
 Run below script to delete AWS resources created by this sample stack.
 ```
